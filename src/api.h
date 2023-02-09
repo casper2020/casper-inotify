@@ -129,6 +129,17 @@ namespace casper
 	    const char* parent_object_name_;
 	    bool        inside_a_watched_directory_;
 	  } E;
+
+	private: // Static Const Data
+
+	  typedef struct {
+	    const char* const name_;
+	    const char* const key_;
+	    const char* const description_;
+	  } FieldInfo;
+
+	  static const std::map<uint32_t, const FieldInfo> sk_field_id_to_name_map_;
+	  static const std::map<std::string, uint32_t>     sk_field_key_to_id_map_;
 	   
 	private: // Const Data
 
@@ -164,6 +175,8 @@ namespace casper
 
 	  void Log (FILE* a_fp, const What a_what, const char* const a_format, ...) __attribute__((format(printf, 4, 5)));
 	  const char* const NowISO8601WithTZ ();
+
+	  void DumpFields (FILE* a_fp) const;
 
         }; // end of class 'API'
         

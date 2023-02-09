@@ -30,6 +30,7 @@
 #include <sys/inotify.h>
 #include <limits.h>
 #include <unistd.h>
+#include <assert.h>
 
 #include "json/json.h"
 
@@ -40,29 +41,75 @@
 
 // https://man7.org/linux/man-pages/man7/inotify.7.html
 
+const std::map<uint32_t, const casper::inotify::API::FieldInfo> casper::inotify::API::sk_field_id_to_name_map_ {
+  { IN_ACCESS       , { "IN_ACCESS"       , "access"       , "File was accessed." } },
+  { IN_ATTRIB       , { "IN_ATTRIB"       , "attrib"       , "Metadata, permissions, timestamps, ownership, etc, changes." } },
+
+  { IN_CLOSE        , { "IN_CLOSE"        , "close"        , "IN_CLOSE_WRITE | IN_CLOSE_NOWRITE"                           } },
+  { IN_CLOSE_WRITE  , { "IN_CLOSE_WRITE"  , "close_write"  , "File opened for writing was closed."                         } },
+  { IN_CLOSE_NOWRITE, { "IN_CLOSE_NOWRITE", "close_nowrite", "File or directory not opened for writing was closed."        } },
+    
+  { IN_CREATE       , { "IN_CREATE"       , "create"       , "File/directory created in watched directory."                } },
+  { IN_DELETE       , { "IN_DELETE"       , "delete"       , "File/directory deleted from watched directory."              } },
+  { IN_DELETE_SELF  , { "IN_DELETE_SELF"  , "delete_self"  , "Watched file/directory was itself deleted."                  } },
+    
+  { IN_MODIFY       , { "IN_MODIFY"       , "modify"       , "File was modified."                                          } },
+    
+  { IN_MOVE         , { "IN_MOVE"         , "move"         , "IN_MOVED_FROM | IN_MOVED_TO."                                } },
+  { IN_MOVE_SELF    , { "IN_MOVE_SELF"    , "move_self"    , "Watched file/directory was itself moved."                    } },
+  { IN_MOVED_FROM   , { "IN_MOVED_FROM"   , "move_from"    , "Generated for the directory containing the old filename when a file is renamed." } },
+  { IN_MOVED_TO     , { "IN_MOVED_TO"     , "move_to"      , "Generated for the directory containing the new filename when a file is renamed." } },
+    
+  { IN_OPEN         , { "IN_OPEN"         , "open"         , "File or directory was opened."                                                   } }
+};
+
+const std::map<std::string, uint32_t> casper::inotify::API::sk_field_key_to_id_map_ = {
+
+  { "open"         , IN_OPEN          },
+  { "create"       , IN_CREATE        },
+
+  { "access"       , IN_ACCESS        },
+  { "modify"       , IN_MODIFY        },
+  
+  { "attrib"       , IN_ATTRIB        },
+
+  { "close_write"  , IN_CLOSE_WRITE   },
+  { "close_nowrite", IN_CLOSE_NOWRITE },
+  { "close"        , IN_CLOSE         },
+    
+  { "delete"       , IN_DELETE        },
+  { "delete_sef"   , IN_DELETE_SELF   },  
+
+  { "move"         , IN_MOVE          },
+  { "move_self"    , IN_MOVE_SELF     },
+  { "move_from"    , IN_MOVED_FROM    },
+  { "move_to"      , IN_MOVED_TO      }
+
+};
+
 /**
  * @brief Default constructor.
  */
- casper::inotify::API::API ()
+casper::inotify::API::API ()
    : pid_(getpid())
- {
-    log_out_fd_ = stdout;
-    inotify_fd_ = -1;
- }
+{
+  log_out_fd_ = stdout;
+  inotify_fd_ = -1;
+}
 
 /**
  * @brief Destructor.
  */
- casper::inotify::API::~API ()
- {
-    if ( nullptr != log_out_fd_ ) {
-        fflush(log_out_fd_);
-        if ( stdout != log_out_fd_ ) {
-            fclose(log_out_fd_);
-        }
+casper::inotify::API::~API ()
+{
+  if ( nullptr != log_out_fd_ ) {
+    fflush(log_out_fd_);
+    if ( stdout != log_out_fd_ ) {
+      fclose(log_out_fd_);
     }
-    Unload();
- }
+  }
+  Unload();
+}
 
 /**
  * @brief Load monitoring rules.
@@ -74,33 +121,19 @@
   const auto events2mask = [] (const Json::Value& a_array) -> uint32_t {
 			     uint32_t mask = 0;
 			     for ( Json::ArrayIndex idx = 0 ; idx < a_array.size(); ++idx ) {
-			       const char* name = a_array[idx].asCString();
-			       if ( 0 == strcasecmp(name, "open") ) {
-				 mask = mask | IN_OPEN;
+			       const auto it = sk_field_key_to_id_map_.find(a_array[idx].asString());
+			       if ( sk_field_key_to_id_map_.end() != it ) {
+				 mask = mask | it->second;
+			       } else {
+				 fprintf(stdout, "%s ???\n", a_array[idx].asCString());
 			       }
-			       if ( 0 == strcasecmp(name, "access") ) {
-				 mask = mask | IN_ACCESS;
-			       }
-			       if ( 0 == strcasecmp(name, "create") ) {
-				 mask = mask | IN_CREATE;
-			       }
-			       if ( 0 == strcasecmp(name, "modify") ) {
-				 mask = mask | IN_MODIFY;
-			       }
-			       if ( 0 == strcasecmp(name, "delete") ) {
-				 mask = mask | IN_DELETE;
-			       }
-			       if ( 0 == strcasecmp(name, "attrib") ) {
-				 mask = mask | IN_ATTRIB;
-			       }
-			       fprintf(stdout, "\t%10.10s: 0x%08X\n", name, mask);
 			     }
-
-			     fprintf(stdout, "~> 0x%08X\n", mask);
 			     return mask;
 		       };
   // ... log ...
   Log(log_out_fd_, API::What::Info, "Loading '%s'...", a_uri.c_str());
+  //
+  DumpFields(stdout);
   // ... TODO ...
   try {
     
@@ -404,7 +437,7 @@ void casper::inotify::API::Wait () {
       actions.push_back("deleted");
     }
     if ( ( event->mask & IN_DELETE ) || ( event-> mask & IN_DELETE_SELF ) ) {
-      tmp_was_deleted_.push_back(entry);
+      tmp_was_deleted_.push_back(entry->second);
     }
     // ... log ...
     if ( 0 == actions.size() ) {
@@ -420,6 +453,7 @@ void casper::inotify::API::Wait () {
     i += EVENT_SIZE + event->len;
   }
   // TODO: handle with tmp_was_deleted_
+  Log(log_out_fd_, API::What::Debug, "@ %s - deleted %zu event(s)", __FUNCTION__, tmp_was_deleted_.size());
   tmp_was_deleted_.clear();
 }
 
@@ -539,4 +573,14 @@ const char* const casper::inotify::API::NowISO8601WithTZ ()
   }
 
   return log_time_buffer_;
+}
+
+// MARK: -
+
+void casper::inotify::API::DumpFields (FILE* a_fp) const
+{
+  for ( const auto& it : API::sk_field_id_to_name_map_ ) {
+    fprintf(a_fp, "0x%08X - %-16.16s - %12.12s - %s\n", it.first, it.second.name_, it.second.key_, it.second.description_);
+  }
+  fflush(stdout);
 }
