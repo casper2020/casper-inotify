@@ -23,12 +23,32 @@
 #ifndef CASPER_INOTIFY_VERSION_H_
 #define CASPER_INOTIFY_VERSION_H_
 
+#ifndef CASPER_INOTIFY_ABBR
+#define CASPER_INOTIFY_ABBR "a.b.b"
+#endif
+
 #ifndef CASPER_INOTIFY_NAME
-#define CASPER_INOTIFY_NAME "casper-inotify"
+#define CASPER_INOTIFY_NAME "c.t.n@b.n.s@"
 #endif
 
 #ifndef CASPER_INOTIFY_VERSION
-#define CASPER_INOTIFY_VERSION "@VERSION@"
+#define CASPER_INOTIFY_VERSION "x.x.x"
+#endif
+
+#ifndef CASPER_INOTIFY_REL_DATE
+#define CASPER_INOTIFY_REL_DATE "r.r.d"
+#endif
+
+#ifndef CASPER_INOTIFY_REL_BRANCH
+#define CASPER_INOTIFY_REL_BRANCH "r.r.b"
+#endif
+
+#ifndef CASPER_INOTIFY_REL_HASH
+#define CASPER_INOTIFY_REL_HASH "r.r.h"
+#endif
+
+#ifndef CASPER_INOTIFY_REL_TARGET
+#define CASPER_INOTIFY_REL_TARGET "r.r.t"
 #endif
 
 #ifndef CASPER_INOTIFY_INFO

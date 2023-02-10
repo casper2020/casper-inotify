@@ -22,23 +22,34 @@
 #include "api.h"
 #include "version.h"
 
+#include <syslog.h>
+
 int main( int argc, char **argv ) {
-  casper::inotify::API api;
+
+  casper::inotify::API api(CASPER_INOTIFY_ABBR, CASPER_INOTIFY_INFO);
 
   int rv;
-  try {
+
+  openlog(CASPER_INOTIFY_ABBR, (LOG_CONS | LOG_PID), LOG_CRON);
+  syslog(LOG_NOTICE, "starting service (version %s)", CASPER_INOTIFY_INFO);
+
+  try {    
     if ( 0 == ( rv = api.Load("/etc/" CASPER_INOTIFY_NAME "/conf.json") ) ) {
       rv = api.Watch();
       api.Unload();
     }
   } catch (const casper::inotify::Exception& a_n_e) {
     rv = -1;
-    fprintf(stderr, "%s\n", a_n_e.what());
+    syslog(LOG_ERR, "%s\n", a_n_e.what());
     api.Unload();
   } catch (const std::exception& a_e) {
     rv = -1;
-    fprintf(stderr, "%s\n", a_e.what());
+    syslog(LOG_ERR, "%s\n", a_e.what());
     api.Unload();
   }
+
+  syslog(LOG_NOTICE, "stopping service");
+  closelog();
+  
   return rv;
 }

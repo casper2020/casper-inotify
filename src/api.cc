@@ -26,11 +26,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <sys/types.h>
+
 #include <sys/inotify.h>
 #include <limits.h>
-#include <unistd.h>
 #include <assert.h>
+#include <syslog.h>
+
+// setgid, setuid, etc 
+#include <sys/types.h>
+#include <unistd.h>
+
+// getpwnam
+#include <sys/types.h>
+#include <pwd.h>
+
+// initgroups
+#include <grp.h>
 
 #include "json/json.h"
 
@@ -38,6 +49,8 @@
 #include <streambuf>
 #include <chrono> // std::chrono
 #include <functional>
+
+#include <signal.h>
 
 // https://man7.org/linux/man-pages/man7/inotify.7.html
 
@@ -87,14 +100,52 @@ const std::map<std::string, uint32_t> casper::inotify::API::sk_field_key_to_id_m
 
 };
 
+#define LOGGER_COLOR_PREFIX "\e"
+
+#define LOGGER_RESET_ATTRS        LOGGER_COLOR_PREFIX "[0m"
+
+#define LOGGER_RESET_ATTRS        LOGGER_COLOR_PREFIX "[0m"
+
+#define LOGGER_MAGENTA_COLOR      LOGGER_COLOR_PREFIX "[00;35m"
+
+#define LOGGER_RED_COLOR          LOGGER_COLOR_PREFIX "[00;31m"
+#define LOGGER_LIGHT_RED_COLOR    LOGGER_COLOR_PREFIX "[00;91m"
+
+#define LOGGER_GREEN_COLOR        LOGGER_COLOR_PREFIX "[00;32m"
+#define LOGGER_LIGHT_GREEN_COLOR  LOGGER_COLOR_PREFIX "[00;92m"
+
+#define LOGGER_CYAN_COLOR         LOGGER_COLOR_PREFIX "[00;36m"
+#define LOGGER_LIGHT_CYAN_COLOR   LOGGER_COLOR_PREFIX "[00;96m"
+
+#define LOGGER_BLUE_COLOR         LOGGER_COLOR_PREFIX "[00;34m"
+#define LOGGER_LIGHT_BLUE_COLOR   LOGGER_COLOR_PREFIX "[00;94m"
+
+#define LOGGER_LIGHT_GRAY_COLOR   LOGGER_COLOR_PREFIX "[00;37m"
+#define LOGGER_DARK_GRAY_COLOR    LOGGER_COLOR_PREFIX "[00;90m"
+    
+#define LOGGER_WHITE_COLOR        LOGGER_COLOR_PREFIX "[00;97m"
+#define LOGGER_YELLOW_COLOR       LOGGER_COLOR_PREFIX "[00;33m"
+#define LOGGER_ORANGE_COLOR       LOGGER_COLOR_PREFIX "[00;33m"
+
+#define LOGGER_WARNING_COLOR      LOGGER_COLOR_PREFIX "[00;33m"
+
+#define LOGGER_COLOR(a_name)      LOGGER_ ## a_name ## _COLOR
+
+#define API_DEFAULT_SHELL "/bin/sh"
+#define API_DEFAULT_PATH  "/usr/bin:/usr/local/bin"
+
 /**
  * @brief Default constructor.
+ * 
+ * @param a_abbtr   Abbreviation.
+ * @param a_version Name & version.
  */
-casper::inotify::API::API ()
-   : pid_(getpid())
+casper::inotify::API::API (const char* const a_abbr, const char* const a_info)
+: pid_(getpid()), abbr_(a_abbr), info_(a_info)
 {
   log_out_fd_ = stdout;
   inotify_fd_ = -1;
+  hostname_[0] = '\0';
 }
 
 /**
@@ -155,6 +206,12 @@ casper::inotify::API::~API ()
       }
     }
     // ...
+    defaults_.user_    = obj["user"].asString();
+    if ( true == obj.isMember("command") ) {
+      defaults_.command_ = obj["command"].asString();
+    }
+    defaults_.message_ = obj.get("message", "§.object §.event event triggered for §.name - §.datetime @ §.hostname").asString();
+    // ...
     const Json::Value dummy_string = "";
     {
       const Json::Value& dirs = obj.get("directories", Json::Value::null);
@@ -168,7 +225,7 @@ casper::inotify::API::~API ()
 	  if ( 0 == mask ) {
 	     continue;
 	  }
-	  entries_.vector_.push_back(new API::Entry{/* f_only_ */ false, API::Kind::Directory, uri.asString(), mask, -1, dirs[idx].get("cmd", dummy_string).asString()});
+	  entries_.vector_.push_back(API::NewEntry(API::Kind::Directory, uri.asString(), mask, dirs[idx], /* a_f_only_ */ false));
 	  sets_.directories_.insert(uri.asString());
 	}
       }
@@ -200,16 +257,21 @@ casper::inotify::API::~API ()
 	    } else {
 	      continue;
 	    }
-	    entries_.vector_.push_back(new API::Entry{/* f_only_ */ true, API::Kind::Directory, directory, IN_MODIFY, -1, files[idx].get("cmd", dummy_string).asString()});
+	    entries_.vector_.push_back(API::NewEntry(API::Kind::Directory, directory, IN_MODIFY, files[idx], /* f_only_ */ true));
 	    if ( IN_MODIFY == mask ) {
 	      // TODO: avoid this event?
 	    }
 	  }
 	  // ...
-	  entries_.vector_.push_back(new API::Entry{/* f_only_ */ false, API::Kind::File, uri.asString(), mask, -1, files[idx].get("cmd", dummy_string).asString()});
+	  entries_.vector_.push_back(API::NewEntry(API::Kind::File, uri.asString(),  mask, files[idx], /* f_only_ */ false));
 	  sets_.files_.insert(uri.asString());
 	}
       }
+    }
+    // ...
+    hostname_[0] = '\0';
+    if ( -1 ==  gethostname(hostname_, sizeof(hostname_) / sizeof(hostname_[0])) ) {
+      throw inotify::Exception("An error occurred while trying to obtain hostname: %d - %s", errno, strerror(errno));
     }
   } catch (const Json::Exception& a_json_exception ) {
     throw inotify::Exception("%s",
@@ -231,7 +293,7 @@ casper::inotify::API::~API ()
    inotify_fd_ = inotify_init();
    if ( inotify_fd_ < 0 ) {
      // ... report error ...
-     throw inotify::Exception("An error occurred while initilizing library: %d - %s",
+     throw inotify::Exception("An error occurred while initializing library: %d - %s",
 			      errno, strerror(errno)
      );
      // ... done ...
@@ -271,7 +333,8 @@ casper::inotify::API::~API ()
        if ( -1 != entry->wd_ ) {
 	 Log(log_out_fd_, API::What::Info, " ✓ [%c] %-*.*s, 0x%08X ⇥ %d", t, int(ml), int(ml), entry->uri_.c_str(), entry->mask_, entry->wd_);
        } else {
-	 Log(log_out_fd_, API::What::Info, " ⨯ [%c] %-*.*s, 0x%08X ⌁ %s", t, int(ml), int(ml), entry->uri_.c_str(), entry->mask_, entry->err_.c_str());
+	 Log(log_out_fd_, API::What::Info, " ⨯ [%c] %-*.*s, 0x%08X ⌁ ⨯", t, int(ml), int(ml), entry->uri_.c_str(), entry->mask_);
+	 Log(log_out_fd_, API::What::Error," ⨯ %s", entry->err_.c_str());
        }
    }
    // ... loop ...
@@ -361,6 +424,7 @@ void casper::inotify::API::Wait () {
     }
     // ...
     API::E e;
+    e.iso_8601_with_tz_ = NowISO8601WithTZ();
     // When events are generated for objects inside a watched directory,
     // the name field in the returned inotify_event structure identifies
     // the name of the file within the directory.
@@ -442,9 +506,16 @@ void casper::inotify::API::Wait () {
     // ... log ...
     if ( 0 == actions.size() ) {
 	Log(log_out_fd_, API::What::Event, "[%c%c] %s '%s' was 0x%08X.", e.parent_object_type_c_, e.object_type_c_, e.object_type_c_str_, e.object_name_c_str_, event->mask);
+	Log(log_out_fd_, API::What::Warning, "event ignored!");
     } else {
       for ( auto action : actions ) {
 	Log(log_out_fd_, API::What::Event, "[%c%c] %s '%s' was %s.", e.parent_object_type_c_, e.object_type_c_, e.object_type_c_str_, e.object_name_c_str_, action.c_str());
+      }
+      e.name_ = actions[0].c_str();
+      if ( 0 != entry->second->cmd_.length() ) {
+	Spawn(*entry->second, e);	
+      } else {
+	Log(log_out_fd_, API::What::Warning, "event ignored!");
       }
     }
     // ... clean up ...
@@ -496,27 +567,32 @@ void casper::inotify::API::Log (FILE* a_fp, const API::What a_what, const char* 
   std::va_list args;
   try {
     const char* what;
+    const char* color = LOGGER_RESET_ATTRS;
     switch(a_what) {
     case API::What::Info:
       what = "Info";
       break;
     case API::What::Warning:
       what = "Warning";
+      color = LOGGER_COLOR(YELLOW);
       break;      
      case API::What::Error:
       what = "Error";
+      color = LOGGER_COLOR(RED);
       break;
     case API::What::Event:
       what = "Event";
       break;
     case API::What::Debug:
       what = "Debug";
+      color = LOGGER_COLOR(DARK_GRAY);
       break;
     default:
       what = "???";
+      color = LOGGER_COLOR(RED);
       break;
     }
-    fprintf(a_fp, "%s, %8d, %-10s, ", NowISO8601WithTZ(), pid_, what);
+    fprintf(a_fp, "%s, %8d, %-10.10s, ", NowISO8601WithTZ(), pid_, what);
     {
       auto temp   = std::vector<char> {};
       auto length = std::size_t { 512 };
@@ -531,7 +607,7 @@ void casper::inotify::API::Log (FILE* a_fp, const API::What a_what, const char* 
 	length = static_cast<std::size_t>(status);
       }
       va_end(args);
-      fprintf(a_fp, "%s", length > 0 ? std::string { temp.data(), length }.c_str() : "");
+      fprintf(a_fp, "%s%s" LOGGER_RESET_ATTRS, color, length > 0 ? std::string { temp.data(), length }.c_str() : "");
     }
     fprintf(a_fp, "\n");
     fflush(a_fp);
@@ -583,4 +659,164 @@ void casper::inotify::API::DumpFields (FILE* a_fp) const
     fprintf(a_fp, "0x%08X - %-16.16s - %12.12s - %s\n", it.first, it.second.name_, it.second.key_, it.second.description_);
   }
   fflush(stdout);
+}
+
+// MARK: -
+
+void casper::inotify::API::Spawn (const API::Entry& a_entry,
+				  const API::E& a_event)
+{
+  if ( a_entry.msg_.length() > 0 ) {
+    syslog(LOG_DEBUG, "⌁ (%s) MSG %s", a_entry.user_.c_str(), a_entry.msg_.c_str()); 
+  }
+  syslog(LOG_DEBUG , "⌁ (%s) CMD %s", a_entry.user_.c_str(), a_entry.cmd_.c_str());
+  // ...
+  std::string cmd, msg;
+  const std::map<const std::string*, std::string*> strings = { { &a_entry.cmd_, &cmd}, { &a_entry.msg_, &msg} };
+  for ( auto it : strings ) {
+    (*it.second) = Replace((*it.first) , "§.event"   , a_event.name_);
+    (*it.second) = Replace((*it.second), "§.object"  , a_event.object_type_c_str_);
+    (*it.second) = Replace((*it.second), "§.name"    , a_event.object_name_c_str_);
+    (*it.second) = Replace((*it.second), "§.datetime", a_event.iso_8601_with_tz_);
+    (*it.second) = Replace((*it.second), "§.hostname", hostname_);
+  }
+
+  // TODO: or
+  
+  std::map<const char* const, std::string> vars = {
+     { "CASPER_INOTIFY_EVENT"   , a_event.name_              },
+     { "CASPER_INOTIFY_OBJECT"  , a_event.object_type_c_str_ },
+     { "CASPER_INOTIFY_NAME"    , a_event.object_name_c_str_ },
+     { "CASPER_INOTIFY_DATETIME", a_event.iso_8601_with_tz_  },
+     { "CASPER_INOTIFY_HOSTNAME", hostname_                  },
+     { "CASPER_INOTIFY_MSG"     , msg                        }
+  };
+
+  // ...
+  for ( auto it : strings ) {
+    for ( auto it2 : vars ) {
+      (*it.second) = Replace((*it.first) , ( "${" + std::string(it2.first) + "}" ) , it2.second);
+    }
+  }
+
+  // ...
+  const pid_t pid = fork();
+  if ( 0 > pid )  { // ... unable to fork ...
+    // ... log ...
+    syslog(LOG_ERR, "unable to launch '%s' - fork failure", cmd.c_str());
+    // ... done ...
+    return;
+  } else if ( 0 == pid ) {  // ... child ...
+    // ... close ALL open files ...
+    const int max = getdtablesize();
+    // ... but skip 0 - stdin, 1 - stdout, 2 - stderr ....
+    for ( int n = 3; n < max; n++ ) {
+      close(n);
+    }
+    // ... create session and set process group ID ...
+    setsid();
+    // ... syslog ...
+    openlog(abbr_.c_str(), (LOG_CONS | LOG_PID), LOG_CRON);
+    syslog(LOG_NOTICE, "(%s) CMD %s", a_entry.user_.c_str(), cmd.c_str());
+    // ... exec ...
+    // TODO CW: confirm this
+    signal(SIGINT , SIG_DFL);
+    signal(SIGHUP , SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+    signal(SIGPIPE, SIG_DFL);
+    // TODO CW: fix this?
+    signal(SIGTRAP, SIG_DFL);
+
+    typedef struct {
+      int         no_;
+      std::string str_;
+      const char* what_;
+    } Error;
+    Error error = { 0, "", nullptr };
+ 
+    errno = 0;
+    struct passwd* pwd = getpwnam(a_entry.user_.c_str());
+    if ( nullptr == pwd ) {
+      error.no_   = errno;
+      error.str_  = strerror(errno);
+      error.what_ = "get user info";
+    }
+    if ( 0 == error.no_ && 0 != setgid(pwd->pw_gid) ) {
+      error.no_   = errno;
+      error.str_  = strerror(errno);
+      error.what_ = "set effective group ID";
+    }
+    if ( 0 == error.no_ && 0 != initgroups(a_entry.user_.c_str(), pwd->pw_gid) ) {
+      error.no_   = errno;
+      error.str_  = strerror(errno);
+      error.what_ = "initialize the group access list";
+    }
+    if ( 0 == error.no_ && 0 != setuid(pwd->pw_uid) ) {
+      error.no_   = errno;
+      error.str_  = strerror(errno);
+      error.what_ = "set the effective user ID";
+    }
+    //
+    if ( 0 == error.no_ && 0 != clearenv() ) {
+      error.no_   = -1;
+      error.str_  = "";
+      error.what_ = "clear environment";
+    }
+    // ... if not as root ...
+    if ( 0 == error.no_ && 0 != pwd->pw_uid ) {
+      // ... set specific user environment ...
+      if (
+	  0 != setenv("PATH"              , API_DEFAULT_PATH , 1) ||
+	  0 != setenv("LOGNAME"           , pwd->pw_name     , 1) ||
+	  0 != setenv("USER"              , pwd->pw_name     , 1) ||
+	  0 != setenv("USERNAME"          , pwd->pw_name     , 1) ||
+	  0 != setenv("HOME"              , pwd->pw_dir      , 1) ||
+	  0 != setenv("SHELL"             , pwd->pw_shell    , 1) ||
+	  0 != setenv("CASPER_INOTIFY_MSG", msg.c_str()      , 1)
+        ) {
+	error.no_   = -1;
+	error.str_  = "";
+	error.what_ = "set environment";      
+      }
+      // ...
+      if ( 0 == error.no_ ) {
+	for ( const auto it : vars ) {
+	  if ( 0 != setenv(it.first, it.second.c_str(), 1) ) {
+	    error.no_   = -1;
+	    error.str_  = "";
+	    error.what_ = "set environment var";
+	    break;
+	  }
+	}
+      }
+    }
+    // ... error set?
+    if ( 0 != error.no_ ) {
+      syslog(LOG_ERR, "unable to launch %s", cmd.c_str());
+      syslog(LOG_ERR, "uanble to %s - ( %d ) %s", error.what_, error.no_, error.str_.c_str());
+      exit(-1);
+    }
+    // ...
+    (void)execlp(API_DEFAULT_SHELL, API_DEFAULT_SHELL, "-c", cmd.c_str(), nullptr);
+
+    // ... if it reaches here, an error occurred with execlp ...
+    // ... log ...                                                
+    syslog(LOG_ERR, "unable to launch '%s', execlp failed: %d - %s", cmd.c_str(), errno, strerror(errno));
+    exit(-1);
+    
+  } /* else { ... } - parent */
+
+  // ... log ...
+  syslog(LOG_NOTICE , "⇥  (%s) CMD %s", a_entry.user_.c_str(), cmd.c_str());
+}
+
+const std::string casper::inotify::API::Replace (std::string a_value, const std::string& a_from, const std::string& a_to)
+{
+  size_t start_pos = 0;
+  while ( std::string::npos != ( start_pos = a_value.find(a_from, start_pos) ) ) {
+    a_value.replace(start_pos, a_from.length(), a_to);
+    start_pos += a_to.length();
+  }
+  return a_value;
 }

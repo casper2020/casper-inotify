@@ -30,6 +30,8 @@
 #include <cstdio>     // std::vsnprintf
 #include <cstdarg>    // va_start, va_end, std::va_list
 
+#include "json/json.h"
+
 namespace casper
 {
 
@@ -102,12 +104,14 @@ namespace casper
         private: // Data Type(s)
 
 	  typedef struct {
-	    bool              f_only_; //!<
 	    const Kind        kind_;   //!< One of \link Kind \link.
 	    const std::string uri_;    //!<
 	    uint32_t          mask_;   //!<
 	    int               wd_;     //!< Watch descriptor.
-	    const std::string cmd_;    //!<
+	    const std::string user_;   //!<
+	    const std::string cmd_;    //!< Command to execute.
+	    const std::string msg_;    //!< Message to export CASPER_INOTIFY_MESSAGE.
+	    bool              f_only_; //!<
 	    std::string       err_;    //!<
 	  } Entry;
 	  
@@ -128,7 +132,15 @@ namespace casper
 	    char        parent_object_type_c_;
 	    const char* parent_object_name_;
 	    bool        inside_a_watched_directory_;
+	    std::string name_;
+	    std::string iso_8601_with_tz_;
 	  } E;
+
+	  typedef struct {
+	    std::string user_;
+	    std::string message_;
+	    std::string command_;
+	  } Defaults;
 
 	private: // Static Const Data
 
@@ -143,16 +155,22 @@ namespace casper
 	   
 	private: // Const Data
 
-	  const pid_t pid_;
+	  const pid_t       pid_;
+	  const std::string abbr_;
+	  const std::string info_;
 	  
         private: // Data
 
-            FILE*       log_out_fd_;
+	  FILE*       log_out_fd_;
+	  
+	  int         inotify_fd_;
 
-            int         inotify_fd_;
-            Entries     entries_;
-	    WatchedSets sets_;
-	    char        log_time_buffer_[27];
+	  Defaults    defaults_;
+	  Entries     entries_;
+	  
+	  WatchedSets sets_;
+	  char        log_time_buffer_[27];
+	  char        hostname_[1024];
 
 	  std::vector<Entry*> tmp_was_deleted_;
             
@@ -160,7 +178,8 @@ namespace casper
             
             API (const API&) = delete;
             API (const API&&) = delete;
-            API ();
+            API () = delete;
+            API(const char* const a_name, const char* const a_version);
             virtual ~API();
             
         public: // Method(s) // Function(s)
@@ -177,6 +196,28 @@ namespace casper
 	  const char* const NowISO8601WithTZ ();
 
 	  void DumpFields (FILE* a_fp) const;
+
+	  void               Spawn (const Entry& a_entry,
+				    const E& a_event);
+	  const std::string  Replace (std::string a_value, const std::string& a_from, const std::string& a_to);
+
+	private: // Method(s) / Function(s)
+
+	  inline Entry* NewEntry (const API::Kind a_kind,
+				  const std::string& a_uri, uint32_t a_mask,
+				  const Json::Value& a_object, const bool a_f_only) const
+	  {
+	    static const Json::Value dummy_string = Json::Value("");
+
+	    return new API::Entry{
+	      a_kind, a_uri, a_mask, -1,
+		a_object.get("user", defaults_.user_).asString(),
+		a_object.get("command", defaults_.command_).asString(),
+		a_object.get("message", defaults_.message_).asString(),
+		a_f_only,
+		"",
+	    };
+	  }
 
         }; // end of class 'API'
         
