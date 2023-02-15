@@ -146,7 +146,7 @@ const std::map<std::string, uint32_t> casper::inotify::API::sk_field_key_to_id_m
 #define DEBUG_LEVEL_BASIC 1
 #define DEBUG_LEVEL_TRACE 2
 
-#define DEBUG_LEVEL 1
+#define DEBUG_LEVEL DEBUG_LEVEL_BASIC
 
 #if defined(DEBUG) || defined(_DEBUG) || defined(ENABLE_DEBUG)
     #define IF_DEBUG(a_level, ...) if ( a_level <= DEBUG_LEVEL ) { __VA_ARGS__ }
@@ -516,6 +516,8 @@ bool casper::inotify::API::Wait ()
                 return false;
             }
             throw inotify::Exception("read error: %d - %s!", errno, strerror(errno));
+        } else {
+            break;
         }
     }
 
@@ -1043,13 +1045,14 @@ void casper::inotify::API::Spawn (const API::Entry& a_entry, const API::Event& a
     const char* const sk_dbg_symbol = "➢";
     // ...
     std::map<const char* const, std::string> vars = {
-        { "CASPER_INOTIFY_EVENT"   , a_event.name_              },
-        { "CASPER_INOTIFY_OBJECT"  , a_event.object_type_c_str_ },
-        { "CASPER_INOTIFY_NAME"    , a_event.object_name_c_str_ },
-        { "CASPER_INOTIFY_DATETIME", a_event.iso_8601_with_tz_  },
-        { "CASPER_INOTIFY_HOSTNAME", owner_.hostname_           },
-        { "CASPER_INOTIFY_MSG"     , a_entry.msg_               },
-        { "CASPER_INOTIFY_CMD"     , a_entry.cmd_               }
+        { "CASPER_INOTIFY_EVENT"      , a_event.name_               },
+        { "CASPER_INOTIFY_OBJECT"     , a_event.object_type_c_str_  },
+        { "CASPER_INOTIFY_NAME"       , a_event.object_name_c_str_  },
+        { "CASPER_INOTIFY_PARENT_NAME", nullptr != a_event.parent_object_name_ ? a_event.parent_object_name_ : "" },
+        { "CASPER_INOTIFY_DATETIME"   , a_event.iso_8601_with_tz_   },
+        { "CASPER_INOTIFY_HOSTNAME"   , owner_.hostname_            },
+        { "CASPER_INOTIFY_MSG"        , a_entry.msg_                },
+        { "CASPER_INOTIFY_CMD"        , a_entry.cmd_                }
     };
     // TODO: check for dependencies w/lemmon ?
     // ... debug ...

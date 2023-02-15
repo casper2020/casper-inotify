@@ -29,6 +29,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 static casper::inotify::API* g_api_ = nullptr;
 
@@ -38,9 +39,29 @@ void on_signal (int a_sig_no)
     g_api_->OnSignal(a_sig_no);
 }
 
+#define VAR_RUN_DIR "/var/run/" CASPER_INOTIFY_NAME
+#define VAR_LOG_DIR "/var/log/" CASPER_INOTIFY_NAME
+#define ETC_DIR "/etc/" CASPER_INOTIFY_NAME
+
 int main( int argc, char **argv ) 
 {
     int rv = -1;
+
+    // ... ensure required directories ...
+    {
+        const mode_t mode = ( S_IRWXU | S_IRGRP | S_IXGRP | S_IXOTH );
+
+        const char* const paths [2] = { VAR_RUN_DIR, VAR_LOG_DIR };
+        for ( size_t idx = 0 ; idx < 2 ; ++idx  ) {
+            if ( -1 == mkdir(paths[idx], mode) ) {
+                if ( errno != EEXIST ) {
+                    fprintf(stderr, "Unable to create directory '%s': %s!", paths[idx], strerror(errno));
+                    fflush(stderr);
+                    return rv;
+                }
+            }
+        }
+    }
 
     // ... install signal handler for logrotate ...
     {
@@ -59,7 +80,7 @@ int main( int argc, char **argv )
         }
     }
     // ... write pid file ...
-    const char* const pid_file_uri = "/var/run/" CASPER_INOTIFY_NAME "/" CASPER_INOTIFY_NAME ".pid";
+    const char* const pid_file_uri = VAR_RUN_DIR "/" CASPER_INOTIFY_NAME ".pid";
     {
         FILE* file = fopen(pid_file_uri, "w");
         if ( nullptr == file ) {
@@ -83,8 +104,8 @@ int main( int argc, char **argv )
     // ... run ...
     g_api_ = new casper::inotify::API();
     try {
-        g_api_->Init(casper::inotify::API::LogLevel::_Event, "/var/log/" CASPER_INOTIFY_NAME "/events.log");
-        g_api_->Load("/etc/" CASPER_INOTIFY_NAME "/conf.json");
+        g_api_->Init(casper::inotify::API::LogLevel::_Event, VAR_LOG_DIR "/" "events.log");
+        g_api_->Load(ETC_DIR "/" "conf.json");
         rv = g_api_->Watch();
         g_api_->Unload();
     } catch (const casper::inotify::Exception& a_n_e) {
