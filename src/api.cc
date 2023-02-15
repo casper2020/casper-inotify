@@ -781,10 +781,10 @@ void casper::inotify::API::Log (const API::LogLevel a_level,
     // ... basic ...
     const std::string pattern = 0 != a_entry.pattern_.length() ? ", " + a_entry.pattern_ : "";
     Log(a_level, "➢ %u, %s%s", a_entry.wd_, a_entry.uri_.c_str(), pattern.c_str());
+    Log(a_level, "➢ 0x%08X", a_event.mask_);
     // ... extended ...
-    if ( API::LogLevel::_Debug == a_level ) {
-        Log(API::LogLevel::_Debug, "➢ 0x%08X, %s @ %s", a_entry.mask_, a_event.object_name_c_str_, a_event.parent_object_name_);
-        Log(API::LogLevel::_Debug, "➢ 0x%08X", a_event.mask_);
+    if ( a_level >= API::LogLevel::_Debug ) {
+        Log(API::LogLevel::_Debug, "➢ %c, 0x%08X, %s @ %s", a_event.object_type_c_, a_entry.mask_, a_event.object_name_c_str_, a_event.parent_object_name_);
         for ( auto action : a_actions ) {
             Log(API::LogLevel::_Debug, "    ➢ %s", action.c_str());
         }
