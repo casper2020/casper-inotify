@@ -33,6 +33,7 @@
 // setgid, setuid, etc 
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 // getpwnam
 #include <sys/types.h>
@@ -49,6 +50,7 @@
 #include <fstream>
 #include <streambuf>
 #include <chrono> // std::chrono
+#include <limits>
 
 #include <signal.h>
 
@@ -155,17 +157,13 @@ const std::map<std::string, uint32_t> casper::inotify::API::sk_field_key_to_id_m
 
 /**
  * @brief Default constructor.
- *
- * @param a_abbtr   Abbreviation.
- * @param a_version Name & version.
  */
-casper::inotify::API::API (const char* const a_abbr, const char* const a_info)
-: abbr_(a_abbr), info_(a_info)
+casper::inotify::API::API ()
 {
     pid_         = getpid();
     inotify_     = { -1, { 0 } };
-    log_         = { nullptr, API::LogLevel::_Event, 0, { 0 } };
-    hostname_[0] = '\0';
+    log_         = { "", nullptr, API::LogLevel::_Event, 0, { 0 } };
+    owner_       = { std::numeric_limits<uid_t>::max(), "", std::numeric_limits<gid_t>::max(), "", ( S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH ), { 0 } };
 }
 
 /**
@@ -187,12 +185,26 @@ casper::inotify::API::~API ()
 void casper::inotify::API::Init (const LogLevel a_level, const std::string& a_uri)
 {
     Unload();
-    log_.fp_ = fopen(a_uri.c_str(), "w+");
-    if ( nullptr == log_.fp_ ) {
-        throw inotify::Exception("An error occurred while trying to open %s: %d - %s", 
-            a_uri.c_str(), errno, strerror(errno)
-        );
+    Open(a_uri, /* a_recycled */ false);
+    // ...
+    owner_.hostname_[0] = '\0';
+    if ( -1 == gethostname(owner_.hostname_, sizeof(owner_.hostname_) / sizeof(owner_.hostname_[0])) ) {
+        throw inotify::Exception("An error occurred while trying to obtain hostname: %d - %s", errno, strerror(errno));
     }
+    // ...
+    owner_.user_id_ = getuid();
+    struct passwd* pw = getpwuid(owner_.user_id_);
+    if ( nullptr == pw ) {
+        throw inotify::Exception("An error occurred while trying to obtain user info: %d - %s", errno, strerror(errno));
+    }
+    owner_.user_name_ = pw->pw_name;
+    // ...
+    owner_.group_id_ = getgid();
+    struct group* gr = getgrgid(owner_.group_id_);
+    if ( nullptr == gr ) {
+        throw inotify::Exception("An error occurred while trying to obtain user group info: %d - %s", errno, strerror(errno));
+    }
+    owner_.group_name_ = gr->gr_name;
     // ... log ...
     Log(API::LogLevel::_Info, "%s...", "Initialized");
 }
@@ -211,28 +223,17 @@ void casper::inotify::API::Load (const std::string& a_uri)
             if ( sk_field_key_to_id_map_.end() != it ) {
                 mask = mask | it->second;
             } else {
-                fprintf(stdout, "%s ???\n", a_array[idx].asCString());
+                throw inotify::Exception("An error ocurred while mask value '%s' - don't know how to map it!",
+                                     a_array[idx].asCString()
+               );
             }
         }
         return mask;
     };
     // ... log ...
     Log(API::LogLevel::_Info, "Loading '%s'...", a_uri.c_str());
-    // ... debug log fields ...
-    IF_DEBUG(DEBUG_LEVEL_BASIC, {
-        const auto spacer = [this]() {
-            for ( size_t idx = 0 ; idx < 140 ; ++idx ) {
-                fprintf(log_.fp_, "%c", '-');
-            }
-            fprintf(log_.fp_, "\n");
-        };        
-        spacer();
-        for ( const auto& it : API::sk_field_id_to_name_map_ ) {
-            fprintf(log_.fp_, "\t0x%08X - %-16.16s - %-13.13s - %s\n", it.first, it.second.name_, it.second.key_, it.second.description_);
-        }
-        spacer();
-        fflush(stdout);
-    })
+    // ... log fields ...
+    Log(API::LogLevel::_Debug, API::sk_field_id_to_name_map_);
     // ...
     std::ifstream t(a_uri);
     const std::string data((std::istreambuf_iterator<char>(t)), std::istreambuf_iterator<char>());    
@@ -313,11 +314,6 @@ void casper::inotify::API::Load (const std::string& a_uri)
             }
         }
     }    
-    // ...
-    hostname_[0] = '\0';
-    if ( -1 ==  gethostname(hostname_, sizeof(hostname_) / sizeof(hostname_[0])) ) {
-        throw inotify::Exception("An error occurred while trying to obtain hostname: %d - %s", errno, strerror(errno));
-    }
 }
 
 /**
@@ -379,6 +375,58 @@ int casper::inotify::API::Watch ()
     Unload();
     // ... done ...
     return 0;
+}
+
+/**
+ * @brief Unload monitoring events.
+ */
+void casper::inotify::API::Unload ()
+{
+    // ... clean entries ...
+    for ( auto& entry : entries_.all_ ) {
+        if ( -1 != entry->wd_ ) {
+            inotify_rm_watch(inotify_.fd_, entry->wd_);
+        }
+        delete entry;
+    }
+    entries_.all_.clear();
+    entries_.good_.clear();
+    entries_.bad_.clear();
+    entries_.uris_.directories_.clear();
+    entries_.uris_.files_.clear();
+    // ... clean inotify ...
+    if ( -1 != inotify_.fd_ ) {
+        close(inotify_.fd_);
+        inotify_.fd_ = -1;
+    }
+    // ... close log file ...
+    if ( nullptr != log_.fp_ ) {
+        fflush(log_.fp_);
+        if ( stdout != log_.fp_ ) {
+            fclose(log_.fp_);
+        }
+        log_.fp_ = nullptr;
+    }
+}
+
+/**
+ * @brief Handle signals.
+ *
+ * @param a_sig_no Signal number to process.
+ */
+void casper::inotify::API::OnSignal (const int a_sig_no)
+{
+    // ... log ...
+    syslog(LOG_NOTICE, "Signal ( %d ) %s...", a_sig_no, strsignal(a_sig_no));
+    if ( SIGUSR1 == a_sig_no ) {
+        // ... recycle log if a log file is open ...
+        if ( nullptr != log_.fp_ ) {
+            // ... re-open log file ...
+            Open(log_.uri_, /* a_recycled */ true);
+        }
+    } else {
+        syslog(LOG_NOTICE, "Signal ignored...");
+    }
 }
 
 // MARK: -
@@ -517,7 +565,7 @@ void casper::inotify::API::Wait ()
             idx += IN_STRUCT_EVENT_SIZE + event->len;
             continue;
         }
-#if DEBUG
+#if 0 // DEBUG
         //
         // when monitoring a directory:
         //
@@ -526,7 +574,7 @@ void casper::inotify::API::Wait ()
         // ( IN_ATTRIB, IN_CLOSE_NOWRITE, IN_OPEN )
         if ( ( event->mask & IN_ATTRIB ) || ( event->mask & IN_CLOSE_NOWRITE ) || ( event->mask & IN_OPEN ) ) {
             if ( event->mask & IN_ISDIR ) {
-                // TODO
+                // TODO: implement
             }
         }
         // ... and ...
@@ -539,9 +587,9 @@ void casper::inotify::API::Wait ()
             ||
             ( event->mask & IN_CLOSE_WRITE  )
             ||
-            ( event->mask &   IN_MOVED_FROM ) || ( event->mask & IN_MOVED_TO )
+            ( event->mask & IN_MOVED_FROM ) || ( event->mask & IN_MOVED_TO )
             ) {
-                // TODO
+                // TODO: implement
             }
 #endif
         // ...
@@ -576,12 +624,9 @@ void casper::inotify::API::Wait ()
             e.name_ = "???";
         }
         // ... log ...
-        IF_DEBUG(DEBUG_LEVEL_BASIC, { 
-            if ( nullptr == entry->second->handler_ ) {
-                    Log(DEBUG_LEVEL_BASIC, e, *entry->second, actions); 
-                }                
-            }
-        );
+        if ( nullptr == entry->second->handler_ ) {
+            Log(API::LogLevel::_Info, e, *entry->second, actions); 
+        }                
         // ...
         if ( nullptr != entry->second->handler_ && false == entry->second->handler_(*entry->second, e) ) {
             // ... log ...
@@ -608,36 +653,58 @@ void casper::inotify::API::Wait ()
     }
 }
 
+// MARK: -
+
 /**
- * @brief Unload monitoring events.
+ * @brief Open a log file.
+ *
+ * @param a_uri      Log file URI.
+ * @param a_recycled True if it's a recycle request.
  */
-void casper::inotify::API::Unload ()
+void casper::inotify::API::Open (const std::string& a_uri, const bool a_recycled)
 {
-    // ... clean entries ...
-    for ( auto& entry : entries_.all_ ) {
-        if ( -1 != entry->wd_ ) {
-            inotify_rm_watch(inotify_.fd_, entry->wd_);
-        }
-        delete entry;
-    }
-    entries_.all_.clear();
-    entries_.good_.clear();
-    entries_.bad_.clear();
-    entries_.uris_.directories_.clear();
-    entries_.uris_.files_.clear();
-    // ... clean inotify ...
-    if ( -1 != inotify_.fd_ ) {
-        close(inotify_.fd_);
-        inotify_.fd_ = -1;
-    }
-    // ... close log file ...
+    // ... close ...
     if ( nullptr != log_.fp_ ) {
         fflush(log_.fp_);
-        if ( stdout != log_.fp_ ) {
-            fclose(log_.fp_);
-        }
-        log_.fp_ = nullptr;
+        fclose(log_.fp_);
     }
+    // ... open ...
+    log_.fp_ = fopen(a_uri.c_str(), a_recycled ? "w" : "w+");
+    if ( nullptr == log_.fp_ ) {
+        throw inotify::Exception("An error occurred while trying to open %s: %d - %s", 
+            a_uri.c_str(), errno, strerror(errno)
+        );
+    }
+    log_.uri_ = a_uri;
+    // ...
+    if ( false == a_recycled ) {
+        // ... done ...
+        return;
+    }
+    // ...
+    fprintf(log_.fp_, "--- --- ---\n");
+    fprintf(log_.fp_, "⌥ LOG FILE   : %s\n", log_.uri_.c_str());
+    fprintf(log_.fp_, "⌥ OWNERSHIP  : %4o\n", owner_.mode_);
+    // if ( not ( ( std::numeric_limits<uid_t>::max() == owner_.user_id_ || std::numeric_limits<gid_t>::max() == owner_.group_id_ ) || ( 0 == owner_.user_id_ || 0 == owner_.group_id_ ) ) ) {
+        fprintf(log_.fp_, "  - USER : %s ( %u )\n", owner_.user_name_.c_str() , owner_.user_id_);
+        fprintf(log_.fp_, "  - GROUP: %s ( %u )\n", owner_.group_name_.c_str(), owner_.group_id_);
+    // }
+    fprintf(log_.fp_, "⌥ PERMISSIONS:\n");
+    fprintf(log_.fp_, "  - MODE : %-4o\n", owner_.mode_);
+    fprintf(log_.fp_, "⌥ RECYCLED AT: %s\n", Now(log_.time_));
+    fprintf(log_.fp_, "--- --- ---\n");
+    fflush(log_.fp_);
+    // ... ensure ownership ... 
+    const int chown_status = chown(a_uri.c_str(), owner_.user_id_, owner_.group_id_);
+    if ( 0 != chown_status ) {
+        syslog(LOG_WARNING, "WARNING: failed to change ownership of %s to %u:%u ~ %d - %s\n", log_.uri_.c_str(), owner_.user_id_, owner_.group_id_, errno, strerror(errno));
+    }
+    const int chmod_status = chmod(a_uri.c_str(), owner_.mode_);
+    if ( 0 != chmod_status ) {
+        syslog(LOG_WARNING, "WARNING: failed to change permissions of %s to %o ~ %d - %s\n", log_.uri_.c_str(), owner_.mode_, errno, strerror(errno));
+    }
+    // ... log ...
+    syslog(LOG_NOTICE, "%s recycled.", log_.uri_.c_str());
 }
 
 /**
@@ -697,23 +764,33 @@ void casper::inotify::API::Log (const char* const a_symbol, const API::Entry& a_
 /**
  * @brief Log an event trigger for a specific entry.
  *
- * @param a_level   Log level.
+ * @param a_level   One of \link API::LogLevel \link.
  * @param a_entry   Entry to log.
  * @param a_event   Event to log.
  * @param a_actions Actions to log.
  */
-void casper::inotify::API::Log (const int a_level,
+void casper::inotify::API::Log (const API::LogLevel a_level,
                                 const API::Event& a_event, const API::Entry& a_entry,
                                 const std::vector<std::string>& a_actions)
 {
-    IF_DEBUG(a_level, {
-        Log(API::LogLevel::_Debug, "➢ %u, %s", a_entry.wd_, a_entry.uri_.c_str());
+    // ... no log?
+    if ( nullptr == log_.fp_ || a_level > log_.level_ ) {
+        // ... nothing to do here ...
+        return;
+    }
+    // ... basic ...
+    const std::string pattern = 0 != a_entry.pattern_.length() ? ", " + a_entry.pattern_ : "";
+    Log(a_level, "➢ %u, %s%s", a_entry.wd_, a_entry.uri_.c_str(), pattern.c_str());
+    // ... extended ...
+    if ( API::LogLevel::_Debug == a_level ) {
         Log(API::LogLevel::_Debug, "➢ 0x%08X, %s @ %s", a_entry.mask_, a_event.object_name_c_str_, a_event.parent_object_name_);
         Log(API::LogLevel::_Debug, "➢ 0x%08X", a_event.mask_);
         for ( auto action : a_actions ) {
             Log(API::LogLevel::_Debug, "    ➢ %s", action.c_str());
         }
-    })
+    }
+    // ... basic ...
+    Log(a_level, " ⇥ (%s) CMD %s", a_entry.user_.c_str(), a_entry.cmd_.c_str());
 }
 
 /**
@@ -781,6 +858,34 @@ void casper::inotify::API::Log (const API::LogLevel a_level, const char* const a
         va_end(args);
         throw a_exception;
     }
+}
+
+/**
+ * @brief Dump fields info.
+ *
+ * @param a_level  One of \link API::LogLevel \link.
+ * @param a_fields Fields info do dump.
+ */
+void casper::inotify::API::Log (const API::LogLevel a_level, const std::map<uint32_t, const FieldInfo>& a_fields)
+{
+     // ... no log?
+    if ( nullptr == log_.fp_ || a_level > log_.level_ ) {
+        // ... nothing to do here ...
+        return;
+    }
+    // .... log ....
+    const auto spacer = [this]() {
+        for ( size_t idx = 0 ; idx < 140 ; ++idx ) {
+            fprintf(log_.fp_, "%c", '-');
+        }
+        fprintf(log_.fp_, "\n");
+    };        
+    spacer();
+    for ( const auto& it : a_fields ) {
+        fprintf(log_.fp_, "\t0x%08X - %-16.16s - %-13.13s - %s\n", it.first, it.second.name_, it.second.key_, it.second.description_);
+    }
+    spacer();
+    fflush(stdout);
 }
 
 // MARK: -
@@ -902,26 +1007,26 @@ void casper::inotify::API::Ignore (const API::Entry& a_entry, const API::Event& 
  */
 void casper::inotify::API::Spawn (const API::Entry& a_entry, const API::Event& a_event)
 {
-    IF_DEBUG_DECLARE(const char* const sk_dbg_symbol = "➢";)
+    const char* const sk_dbg_symbol = "➢";
     // ...
     std::map<const char* const, std::string> vars = {
         { "CASPER_INOTIFY_EVENT"   , a_event.name_              },
         { "CASPER_INOTIFY_OBJECT"  , a_event.object_type_c_str_ },
         { "CASPER_INOTIFY_NAME"    , a_event.object_name_c_str_ },
         { "CASPER_INOTIFY_DATETIME", a_event.iso_8601_with_tz_  },
-        { "CASPER_INOTIFY_HOSTNAME", hostname_                  },
+        { "CASPER_INOTIFY_HOSTNAME", owner_.hostname_           },
         { "CASPER_INOTIFY_MSG"     , a_entry.msg_               },
         { "CASPER_INOTIFY_CMD"     , a_entry.cmd_               }
     };
+    // TODO: check for dependencies w/lemmon ?
     // ... debug ...
-    IF_DEBUG(DEBUG_LEVEL_BASIC, {
+    if ( log_.level_ >= API::LogLevel::_Debug ) {
         syslog(LOG_DEBUG, "%s (%s) DBG", sk_dbg_symbol, a_entry.user_.c_str());
         // ... dump env vars ...
         for ( auto it : vars ) {
             syslog(LOG_DEBUG, "    %s VAR %-*.*s: %s", sk_dbg_symbol, 23, 23, it.first, it.second.c_str());
         }
-    })
-    
+    }    
     // ...
     std::string cmd, msg;
     const std::map<const std::string*, std::string*> strings = { { &a_entry.cmd_, &cmd}, { &a_entry.msg_, &msg} };
@@ -932,7 +1037,7 @@ void casper::inotify::API::Spawn (const API::Entry& a_entry, const API::Event& a
         }
     }
     // ... debug ...
-    IF_DEBUG(DEBUG_LEVEL_TRACE, {
+    if ( log_.level_ >= API::LogLevel::_Debug ) {
         syslog(LOG_DEBUG, "%s (%s) DBG", sk_dbg_symbol, a_entry.user_.c_str());
         // ... dump message?
         if ( a_entry.msg_.length() > 0 ) {
@@ -940,7 +1045,7 @@ void casper::inotify::API::Spawn (const API::Entry& a_entry, const API::Event& a
         }
         // ... dump command ...
         syslog(LOG_DEBUG, "    %s CMD %s", sk_dbg_symbol, cmd.c_str());
-    })
+    }
     // ...
     const pid_t pid = fork();
     if ( 0 > pid )  { // ... unable to fork ...
@@ -958,16 +1063,9 @@ void casper::inotify::API::Spawn (const API::Entry& a_entry, const API::Event& a
         }
         // ... create session and set process group ID ...
         setsid();
-        // ... exec ...
-        // TODO CW: confirm this
-        signal(SIGINT , SIG_DFL);
-        signal(SIGHUP , SIG_DFL);
-        signal(SIGTERM, SIG_DFL);
-        signal(SIGUSR2, SIG_DFL);
-        signal(SIGPIPE, SIG_DFL);
-        // TODO CW: fix this?
-        signal(SIGTRAP, SIG_DFL);
-        
+        // ... reset ...
+        signal(SIGUSR1, SIG_DFL);
+        // ... error info ...        
         typedef struct {
             int         no_;
             std::string str_;
@@ -1046,7 +1144,7 @@ void casper::inotify::API::Spawn (const API::Entry& a_entry, const API::Event& a
     } /* else { ... } - parent */
     
     // ... log ...
-    syslog(LOG_NOTICE , LOGGER_PASS_SYMBOL " (%s) CMD %s", a_entry.user_.c_str(), cmd.c_str());
+    syslog(LOG_NOTICE, LOGGER_PASS_SYMBOL " (%s) CMD %s", a_entry.user_.c_str(), cmd.c_str());
 }
 
 /**
@@ -1075,11 +1173,8 @@ bool casper::inotify::API::Handler (const API::Entry& a_entry, const API::Event&
         return false;
     }
     // ... log ...
-    Log(API::LogLevel::_Info, "Case #1 '%s'...", uri.c_str());
-    IF_DEBUG(DEBUG_LEVEL_BASIC, {
-            Log(DEBUG_LEVEL_BASIC, a_event, a_entry, { a_event.name_ });
-        }             
-    )
+    Log(API::LogLevel::_Info, "Handler, case #1 '%s'...", uri.c_str());    
+    Log(API::LogLevel::_Debug, a_event, a_entry, { a_event.name_ });
     // ... search ...
     API::Entry* entry = nullptr;
     for ( size_t idx = 0 ; idx < entries_.bad_.size() ; ++idx ) {

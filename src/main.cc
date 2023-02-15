@@ -25,57 +25,56 @@
 #include <syslog.h>
 #include <signal.h> // sigemptyset, sigaction, etc...
 #include <string.h> // strsignal, etc...
+#include <assert.h>
+
+static casper::inotify::API* g_api_ = nullptr;
 
 void on_signal (int a_sig_no)
 {
-    const char* const name = strsignal(a_sig_no);
-    fprintf(stdout, "on_signal: %s\n", name);
+    assert(nullptr != g_api_);    
+    g_api_->OnSignal(a_sig_no);
 }
-
 
 int main( int argc, char **argv ) 
 {
-    
-    // TODO: log rotate signal
-    // struct sigaction act;
+    int rv = -1;
 
-    // memset(&act, 0, sizeof(act));
-
-    // sigemptyset(&act.sa_mask);
-    // act.sa_handler = on_signal;
-    // act.sa_flags    = SA_NODEFER;
-    // if ( -1 == sigaction(SIGTTIN, &act, 0) ) {
-    //     fprintf(stderr, "%d - %s\n", errno, strerror(errno));
-    //     fflush(stderr);
-    //     return -1;
-    // }
-    
-    casper::inotify::API* api = new casper::inotify::API(CASPER_INOTIFY_ABBR, CASPER_INOTIFY_INFO);
-    
-    int rv;
-    
-    openlog(CASPER_INOTIFY_ABBR, (LOG_CONS | LOG_PID), LOG_CRON);
-    syslog(LOG_NOTICE, "starting service (version %s)", CASPER_INOTIFY_INFO);
-    
+    // ... install signal handler for logrotate ...
+    {
+        struct sigaction act;
+        memset(&act, 0, sizeof(act));
+        sigemptyset(&act.sa_mask);
+        act.sa_handler = on_signal;
+        act.sa_flags   = SA_RESTART;
+        if ( -1 == sigaction(SIGUSR1, &act, 0) ) {
+            fprintf(stderr, "%d - %s\n", errno, strerror(errno));
+            fflush(stderr);
+            return rv;
+        }
+    }
+    // ... open syslog ...
+    openlog(CASPER_INOTIFY_NAME, (LOG_CONS | LOG_PID), LOG_CRON);
+    syslog(LOG_NOTICE, "Starting (version %s)", CASPER_INOTIFY_INFO);
+    // ... run ...
+    g_api_ = new casper::inotify::API();
     try {
-        api->Init(casper::inotify::API::LogLevel::_Event, "/var/log/" CASPER_INOTIFY_NAME "/events.log");
-        api->Load("/etc/" CASPER_INOTIFY_NAME "/conf.json");
-        rv = api->Watch();
-        api->Unload();
+        g_api_->Init(casper::inotify::API::LogLevel::_Event, "/var/log/" CASPER_INOTIFY_NAME "/events.log");
+        g_api_->Load("/etc/" CASPER_INOTIFY_NAME "/conf.json");
+        rv = g_api_->Watch();
+        g_api_->Unload();
     } catch (const casper::inotify::Exception& a_n_e) {
         rv = -1;
         syslog(LOG_ERR, "%s\n", a_n_e.what());
-        api->Unload();
+        g_api_->Unload();
     } catch (const std::exception& a_e) {
         rv = -1;
         syslog(LOG_ERR, "%s\n", a_e.what());
-        api->Unload();
+        g_api_->Unload();
     }
-
-    delete api;
-    
-    syslog(LOG_NOTICE, "stopping service");
+    delete g_api_;
+    // ... close syslog ...
+    syslog(LOG_NOTICE, "Stopping...");
     closelog();
-    
+    // ... done ...
     return rv;
 }

@@ -113,7 +113,17 @@ namespace casper
                 std::string command_;
             } Defaults;
 
+            struct _Owner {
+                uid_t       user_id_;
+                std::string user_name_;
+                gid_t       group_id_;
+                std::string group_name_;
+                mode_t      mode_;
+                char        hostname_[1024];
+            };
+
 			struct _Log {
+                std::string uri_;
             	FILE*       fp_;
 				LogLevel    level_;
             	int         entry_ml_;
@@ -136,34 +146,29 @@ namespace casper
             static const std::map<uint32_t, const FieldInfo> sk_field_id_to_name_map_;
             static const std::map<std::string, uint32_t>     sk_field_key_to_id_map_;
             
-        private: // Const Data
-            
-            const std::string abbr_;
-            const std::string info_;
-            
         private: // Data
             
             pid_t       	pid_;
 			struct _INotify inotify_;
 			struct _Log		log_;
-            char        	hostname_[1024];
+            struct _Owner   owner_;
             Defaults    	defaults_;
             Entries     	entries_;
 
         public: // Constructor(s) / Destructor
             
-            API () = delete;
             API (const API&) = delete;
             API (const API&&) = delete;
-            API(const char* const a_name, const char* const a_version);
+            API();
             virtual ~API();
             
         public: // Method(s) // Function(s)
             
-			void Init   (const LogLevel a_level, const std::string& a_uri);
-            void Load   (const std::string& a_uri);
-            int  Watch  ();
-            void Unload ();
+			void Init     (const LogLevel a_level, const std::string& a_uri);
+            void Load     (const std::string& a_uri);
+            int  Watch    ();
+            void Unload   ();
+            void OnSignal (const int a_sig_no);
             
         private: // Method(s) // Function(s)
             
@@ -173,11 +178,13 @@ namespace casper
             
         private: // Method(s) // Function(s)
 
-            void Log (const LogLevel a_level, const char* const a_format, ...) __attribute__((format(printf, 3, 4)));
-			void Log (const Entries& a_entries);
-            void Log (const char* const a_symbol, const Entry& a_entry);
-            void Log (const int a_level, const Event& a_event, const Entry& a_entry,
-					  const std::vector<std::string>& a_actions);
+            void Open (const std::string& a_uri, const bool a_recycled);
+            void Log  (const LogLevel a_level, const char* const a_format, ...) __attribute__((format(printf, 3, 4)));
+			void Log  (const Entries& a_entries);
+            void Log  (const char* const a_symbol, const Entry& a_entry);
+            void Log  (const LogLevel a_level, const Event& a_event, const Entry& a_entry,
+					   const std::vector<std::string>& a_actions);
+            void Log  (const API::LogLevel a_level, const std::map<uint32_t, const FieldInfo>& a_fields);
 
 		private: // Method(s) // Function(s)
 
