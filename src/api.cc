@@ -35,6 +35,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+// fcntl
+#include <fcntl.h>
+
 // getpwnam
 #include <sys/types.h>
 #include <pwd.h>
@@ -164,6 +167,7 @@ casper::inotify::API::API ()
     inotify_     = { -1, { 0 } };
     log_         = { "", nullptr, API::LogLevel::_Event, 0, { 0 } };
     owner_       = { std::numeric_limits<uid_t>::max(), "", std::numeric_limits<gid_t>::max(), "", ( S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH ), { 0 } };
+    quit_        = false;
 }
 
 /**
@@ -349,12 +353,14 @@ int casper::inotify::API::Watch ()
     Log(entries_);
     Log(API::LogLevel::_Info, "%s...", "Ready");
     // ... loop ...
-    while ( true ) {
+    while ( false == quit_ ) {
         try {
             // ... log ...
             Log(API::LogLevel::_Debug, "%s...", "Waiting");
             // ... wait for event ...
-            Wait();
+            if ( false == Wait() ) {
+                break;
+            }
         } catch (const std::exception& a_e) {
             // ... log and break ...
             try {
@@ -365,10 +371,11 @@ int casper::inotify::API::Watch ()
             }
         }
     }
+    Log(API::LogLevel::_Info, "%s...", "Gone");
     // ... unregister ...
     for ( auto& it : entries_.good_ ) {
         if ( true == Unregister(it.second) ) {
-            Untrack(it.second);
+            // ... TODO: report error
         }
     }
     // ... clean up  ...
@@ -424,7 +431,10 @@ void casper::inotify::API::OnSignal (const int a_sig_no)
             // ... re-open log file ...
             Open(log_.uri_, /* a_recycled */ true);
         }
+    } else if ( SIGQUIT == a_sig_no || SIGTERM == a_sig_no ) {
+        quit_ = true;
     } else {
+        syslog(LOG_NOTICE, "Signal %d vs %d vs %d...", a_sig_no, SIGQUIT, SIGTERM);
         syslog(LOG_NOTICE, "Signal ignored...");
     }
 }
@@ -484,12 +494,33 @@ bool casper::inotify::API::Unregister (API::Entry* a_entry)
 
 /**
  * @brief Wait for next event.
+ *
+ * @return True if we should try again, false when it's time to stop.
  */
-void casper::inotify::API::Wait ()
+bool casper::inotify::API::Wait ()
 {   
-    const int length = read(inotify_.fd_, inotify_.buffer_, IN_BUFFER_MAX_LENGTH);
-    if ( length < 0 ) {
-        throw inotify::Exception("read error: %d - %s!", errno, strerror(errno));
+    static const int timeout_us = 1000*1000;
+    int flags = fcntl(inotify_.fd_, F_GETFL);
+    if ( -1 == fcntl(inotify_.fd_, F_SETFL, flags | O_NONBLOCK) ) {
+        throw inotify::Exception("Unable to setup NON-BLOCK reading: %d - %s!", errno, strerror(errno));
+    }
+    int length;
+
+    while ( false == quit_ ) {
+        length = read(inotify_.fd_, inotify_.buffer_, IN_BUFFER_MAX_LENGTH);
+        if ( length < 0 ) {
+            if ( EWOULDBLOCK == errno || EAGAIN == errno ) {
+                usleep(timeout_us);
+                continue;
+            } else if ( EINTR == errno ) { 
+                return false;
+            }
+            throw inotify::Exception("read error: %d - %s!", errno, strerror(errno));
+        }
+    }
+
+    if ( true == quit_ ) {
+        return false;
     }
     
     // ... log ...
@@ -651,6 +682,8 @@ void casper::inotify::API::Wait ()
         // ... next ...
         idx += IN_STRUCT_EVENT_SIZE + event->len;
     }
+    // ... continue ...
+    return true;
 }
 
 // MARK: -

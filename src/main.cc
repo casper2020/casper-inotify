@@ -27,6 +27,9 @@
 #include <string.h> // strsignal, etc...
 #include <assert.h>
 
+#include <stdio.h>
+#include <unistd.h>
+
 static casper::inotify::API* g_api_ = nullptr;
 
 void on_signal (int a_sig_no)
@@ -46,15 +49,37 @@ int main( int argc, char **argv )
         sigemptyset(&act.sa_mask);
         act.sa_handler = on_signal;
         act.sa_flags   = SA_RESTART;
-        if ( -1 == sigaction(SIGUSR1, &act, 0) ) {
-            fprintf(stderr, "%d - %s\n", errno, strerror(errno));
+        const std::vector<int> signals = { SIGUSR1, SIGQUIT, SIGTERM };
+        for ( auto signal : signals ) {
+            if ( -1 == sigaction(signal, &act, 0) ) {
+                fprintf(stderr, "Unable to install signal handler: %d - %s\n", errno, strerror(errno));
+                fflush(stderr);
+                return rv;
+            }
+        }
+    }
+    // ... write pid file ...
+    const char* const pid_file_uri = "/var/run/" CASPER_INOTIFY_NAME "/" CASPER_INOTIFY_NAME ".pid";
+    {
+        FILE* file = fopen(pid_file_uri, "w");
+        if ( nullptr == file ) {
+            fprintf(stderr, "Unable to open pid file '%s': %d - %s\n", pid_file_uri, errno, strerror(errno));
             fflush(stderr);
             return rv;
         }
+        const int bytes_written = fprintf(file, "%d", getpid());
+        if ( bytes_written <= 0 ) {
+            fclose(file);
+            fprintf(stderr, "Unable to write date at pid file '%s'!", pid_file_uri);
+            fflush(stderr);
+            return rv;
+        }
+        fclose(file);
     }
     // ... open syslog ...
     openlog(CASPER_INOTIFY_NAME, (LOG_CONS | LOG_PID), LOG_CRON);
     syslog(LOG_NOTICE, "Starting (version %s)", CASPER_INOTIFY_INFO);
+    syslog(LOG_NOTICE, "PID file is %s", pid_file_uri);
     // ... run ...
     g_api_ = new casper::inotify::API();
     try {
@@ -72,8 +97,16 @@ int main( int argc, char **argv )
         g_api_->Unload();
     }
     delete g_api_;
+    // ... pid file ...
+    if ( -1 != unlink(pid_file_uri) ) {
+        if ( EINTR != errno ) {
+            rv = -1;
+            fprintf(stderr, "Unable to remove pid file '%s': %d - %s\n", pid_file_uri, errno, strerror(errno));
+            fflush(stderr);
+        }
+    }
     // ... close syslog ...
-    syslog(LOG_NOTICE, "Stopping...");
+    syslog(LOG_NOTICE, "Gone...");
     closelog();
     // ... done ...
     return rv;

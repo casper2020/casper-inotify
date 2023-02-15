@@ -154,6 +154,7 @@ namespace casper
             struct _Owner   owner_;
             Defaults    	defaults_;
             Entries     	entries_;
+            bool            quit_;
 
         public: // Constructor(s) / Destructor
             
@@ -174,7 +175,7 @@ namespace casper
             
             bool Register   (Entry* a_entry);
             bool Unregister (Entry* a_entry);
-            void Wait ();
+            bool Wait ();
             
         private: // Method(s) // Function(s)
 
